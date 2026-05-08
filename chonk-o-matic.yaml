@@ -3,8 +3,6 @@ esphome:
   friendly_name: ${devicename_friendly}
   libraries:
     - "bblanchon/ArduinoJson"
-  includes:
-    - json_helper.h
   on_boot:
     priority: 600
     then:
@@ -89,6 +87,15 @@ globals:
     type: unsigned long
     restore_value: false
     initial_value: '0'
+
+# ---------------------------------------------------------
+# BUILD OPTIONS
+# Force-include ArduinoJson so lambdas can use it without a local .h file.
+# build_src_flags applies only to main.cpp (not libraries), so it won't
+# conflict with ESPHome's own build_flags.
+# ---------------------------------------------------------
+platformio_options:
+  build_src_flags: "-include ArduinoJson.h"
 
 # ---------------------------------------------------------
 # TIME (Network Only)

@@ -328,7 +328,6 @@ The following values survive power loss (stored in ESP32 NVS flash):
 ```text
 chonk-o-matic/
 ├── chonk-o-matic.yaml   # The reusable ESPHome package (pulled via GitHub packages)
-├── json_helper.h        # C++ header bundled with the package
 ├── example.yaml         # Copy this to your ESPHome config directory and customise
 └── README.md
 ```
