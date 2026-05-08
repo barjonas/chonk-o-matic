@@ -1,0 +1,553 @@
+esphome:
+  name: ${devicename}
+  friendly_name: ${devicename_friendly}
+  libraries:
+    - "bblanchon/ArduinoJson"
+  includes:
+    - json_helper.h
+  on_boot:
+    priority: 600
+    then:
+      # Home servo to idle position on startup
+      - servo.write:
+          id: feed_servo
+          level: ${servo_idle_level}
+      - logger.log: "Servo homed to idle position"
+
+# ---------------------------------------------------------
+# LOGGER
+# ---------------------------------------------------------
+logger:
+
+# ---------------------------------------------------------
+# CAPTIVE PORTAL (for WiFi reconfiguration in AP mode)
+# ---------------------------------------------------------
+captive_portal:
+
+# ---------------------------------------------------------
+# API & OTA (Secure)
+# ---------------------------------------------------------
+api:
+  encryption:
+    key: ${api_key}
+  services:
+    - service: award_credit
+      then:
+        - script.execute:
+            id: process_entry
+            award_amount: 1
+            dispense_count: 0
+    - service: dispense_credit
+      then:
+        - script.execute:
+            id: process_entry
+            award_amount: 0
+            dispense_count: 1
+    - service: force_dispense
+      then:
+        - script.execute:
+            id: process_entry
+            award_amount: 1
+            dispense_count: 1
+
+ota:
+  - platform: esphome
+
+# ---------------------------------------------------------
+# GLOBALS & STORAGE
+# ---------------------------------------------------------
+globals:
+  - id: credits
+    type: int
+    restore_value: true
+    initial_value: '0'
+  - id: units_dispensed_today
+    type: int
+    restore_value: true
+    initial_value: '0'
+  - id: lifetime_dispensed
+    type: int
+    restore_value: true
+    initial_value: '0'
+  - id: last_reset_day
+    type: int
+    restore_value: true
+    initial_value: '-1'
+  - id: processed_schedules
+    type: std::string
+    restore_value: false
+    initial_value: '""'
+  - id: last_known_hour
+    type: int
+    restore_value: true
+    initial_value: '-1'
+  - id: last_known_minute
+    type: int
+    restore_value: true
+    initial_value: '-1'
+  - id: last_dispense_millis
+    type: unsigned long
+    restore_value: false
+    initial_value: '0'
+
+# ---------------------------------------------------------
+# TIME (Network Only)
+# ---------------------------------------------------------
+time:
+  - platform: homeassistant
+    id: ha_time
+    # If WiFi is down on boot, this stays at 1970-01-01 00:00:00
+    # The logic below still works, it just runs relative to boot time.
+
+# ---------------------------------------------------------
+# INPUTS
+# ---------------------------------------------------------
+text:
+  # Default: At noon (12:00), award 5 credits. Dispense 1 immediately, leave 4 for on-demand feeding.
+  # Each entry has 'time' (required), 'award' (optional, default 0), 'dispense' (optional, default 0).
+  - platform: template
+    name: "Feeding Schedule (JSON)"
+    id: feed_schedule_json
+    icon: "mdi:wrench-clock"
+    mode: text
+    optimistic: true
+    initial_value: '[{"time": "12:00", "award": 5, "dispense": 1}]'
+    restore_value: true
+    entity_category: config
+
+number:
+  - platform: template
+    name: "Max Daily Dispenses"
+    id: max_daily_dispenses
+    optimistic: true
+    min_value: 1
+    max_value: 999
+    icon: "mdi:car-speed-limiter"
+    step: 1
+    mode: box  # Display as number input spinner instead of slider
+    initial_value: 5
+    restore_value: true
+    entity_category: config
+
+  - platform: template
+    name: "Max Credits"
+    id: max_credits
+    optimistic: true
+    min_value: 1
+    max_value: 999
+    icon: "mdi:basket"
+    step: 1
+    mode: box
+    initial_value: 10
+    restore_value: true
+    entity_category: config
+
+button:
+  - platform: template
+    name: "Award Credit"
+    icon: "mdi:plus-circle"
+    on_press:
+      - script.execute:
+          id: process_entry
+          award_amount: 1
+          dispense_count: 0
+
+  - platform: template
+    name: "Dispense Credit"
+    icon: "mdi:minus-circle"
+    on_press:
+      - script.execute:
+          id: process_entry
+          award_amount: 0
+          dispense_count: 1
+
+  - platform: template
+    name: "Force Dispense"
+    icon: "mdi:cookie"
+    on_press:
+      - script.execute:
+          id: process_entry
+          award_amount: 1
+          dispense_count: 1
+
+# ---------------------------------------------------------
+# LOGIC LOOP
+# ---------------------------------------------------------
+interval:
+  - interval: 1min
+    then:
+      - lambda: |-
+          // 1. Get current time
+          auto time = id(ha_time).now();
+          if (!time.is_valid()) {
+             ESP_LOGW("feeder", "Time not synced yet");
+             return;
+          }
+
+          int current_hour = time.hour;
+          int current_minute = time.minute;
+          int current_day = time.day_of_year;
+          
+          // 2. Parse JSON Schedule (needed for catchup logic)
+          std::string json_str = id(feed_schedule_json).state;
+          if (json_str.length() < 5) return;
+          
+          JsonDocument doc;
+          DeserializationError error = deserializeJson(doc, json_str);
+          if (error) {
+            ESP_LOGW("feeder", "JSON Error: %s", error.c_str());
+            return;
+          }
+          JsonArray schedule_arr = doc.as<JsonArray>();
+
+          // 3. Detect Clock Correction / Time Jump
+          bool time_jumped = false;
+          int old_hour = id(last_known_hour);
+          int old_minute = id(last_known_minute);
+          
+          if (old_hour >= 0 && old_minute >= 0) {
+            // Calculate time difference in minutes
+            int old_total_mins = old_hour * 60 + old_minute;
+            int new_total_mins = current_hour * 60 + current_minute;
+            int diff_mins = new_total_mins - old_total_mins;
+            
+            // Normalize for day wrap (if current time < old time, we crossed midnight)
+            if (diff_mins < 0) diff_mins += 1440; // 24 * 60
+            
+            // If more than 2 minutes elapsed, we had a time jump (allows for slight drift)
+            if (diff_mins > 2) {
+              time_jumped = true;
+              ESP_LOGI("feeder", "Clock correction detected: %02d:%02d -> %02d:%02d (%d min jump)",
+                       old_hour, old_minute, current_hour, current_minute, diff_mins);
+              
+              // 4. CATCHUP LOGIC: Process all missed schedule entries in document order
+              int catchup_dispense_total = 0;
+              for (JsonObject obj : schedule_arr) {
+                const char* sched_time_str = obj["time"];
+                int award = obj["award"] | 0;
+                int sched_dispense = obj["dispense"] | 0;
+                
+                // Parse schedule time
+                int sched_hour, sched_min;
+                if (sscanf(sched_time_str, "%d:%d", &sched_hour, &sched_min) == 2) {
+                  int sched_total_mins = sched_hour * 60 + sched_min;
+                  
+                  // Check if this schedule time falls in the gap
+                  // Between old_total_mins and new_total_mins
+                  bool in_gap = false;
+                  
+                  if (diff_mins < 1440) {  // Less than 24 hours
+                    // Check if schedule falls between old and new time
+                    if (old_total_mins < new_total_mins) {
+                      // Normal case: no midnight wrap
+                      in_gap = (sched_total_mins > old_total_mins && sched_total_mins <= new_total_mins);
+                    } else {
+                      // Midnight wrap case
+                      in_gap = (sched_total_mins > old_total_mins || sched_total_mins <= new_total_mins);
+                    }
+                  } else {
+                    // More than 24 hours - process this schedule entry once
+                    in_gap = true;
+                  }
+                  
+                  if (in_gap) {
+                    // Apply award (clamp to [0, max_credits])
+                    id(credits) += award;
+                    if (id(credits) < 0) id(credits) = 0;
+                    int max_cr = (int)id(max_credits).state;
+                    if (id(credits) > max_cr) id(credits) = max_cr;
+                    
+                    // Track dispenses (respect available credits)
+                    int actual = (sched_dispense > 0 && id(credits) > 0)
+                      ? ((sched_dispense < id(credits)) ? sched_dispense : id(credits))
+                      : 0;
+                    catchup_dispense_total += actual;
+                    id(credits) -= actual;
+                    
+                    ESP_LOGI("feeder", "Catchup: %s award=%d dispense=%d (actual=%d) credits=%d",
+                             sched_time_str, award, sched_dispense, actual, id(credits));
+                  }
+                }
+              }
+              
+              // Trigger physical dispensing for catchup
+              if (catchup_dispense_total > 0) {
+                // Re-add dispense count as credits for dispense_food to consume
+                id(credits) += catchup_dispense_total;
+                ESP_LOGI("feeder", "Catchup: Triggering %d dispenses", catchup_dispense_total);
+                id(dispense_food)->execute(catchup_dispense_total);
+              }
+            }
+          }
+
+          // 5. Handle Daily Reset (once per day based on day-of-year)
+          if (id(last_reset_day) != current_day) {
+             std::string reset_time_str = "${daily_counter_reset_time}";
+             char current_hhmm[6];
+             sprintf(current_hhmm, "%02d:%02d", current_hour, current_minute);
+             
+             if (reset_time_str.find(current_hhmm) == 0) {
+                ESP_LOGI("feeder", "Daily reset triggered");
+                id(units_dispensed_today) = 0;
+                id(last_reset_day) = current_day;
+                id(processed_schedules) = "";  // Clear schedule tracker
+             }
+          }
+
+          // 6. Process Current Time Schedule (if not already processed)
+          char current_hhmm[6];
+          sprintf(current_hhmm, "%02d:%02d", current_hour, current_minute);
+          std::string schedule_key = std::to_string(current_day) + "_" + std::string(current_hhmm);
+          
+          // Only process if we haven't already processed this exact minute today
+          // (prevents double-processing if interval fires twice in same minute)
+          if (id(processed_schedules).find(schedule_key) == std::string::npos) {
+            for (JsonObject obj : schedule_arr) {
+              const char* sched_time = obj["time"];
+              int award = obj["award"] | 0;
+              int sched_dispense = obj["dispense"] | 0;
+
+              // Parse schedule time numerically to handle both "6:55" and "06:55"
+              int sched_h, sched_m;
+              if (sscanf(sched_time, "%d:%d", &sched_h, &sched_m) == 2 &&
+                  sched_h == current_hour && sched_m == current_minute) {
+                 if (!time_jumped) {
+                   ESP_LOGI("feeder", "Schedule %s: award=%d dispense=%d", sched_time, award, sched_dispense);
+                   id(process_entry)->execute(award, sched_dispense);
+                 } else {
+                   ESP_LOGI("feeder", "Schedule %s: already processed via catchup", sched_time);
+                 }
+                 
+                 // Mark as processed
+                 id(processed_schedules) += schedule_key + ";";
+              }
+            }
+          }
+          
+          // 7. Update last known time
+          id(last_known_hour) = current_hour;
+          id(last_known_minute) = current_minute;
+
+# ---------------------------------------------------------
+# HARDWARE
+# ---------------------------------------------------------
+sensor:
+  - platform: adc
+    pin: ${sensor_pin}
+    name: "Proximity Sensor Voltage"
+    id: proximity_volts
+    update_interval: 500ms
+    internal: true  # Hide raw voltage, we'll expose the distance sensor instead
+    attenuation: 12db  # Allows reading 0-3.3V range (needed for Sharp sensor's 0.4-3.0V output)
+    entity_category: diagnostic
+    filters:
+      - sliding_window_moving_average:
+          window_size: 5
+          send_every: 1
+    on_value:
+      then:
+        # Note: This triggers on voltage changes, but we check distance threshold below
+        - if:
+            condition:
+              and:
+                - lambda: 'return id(proximity_distance).state < ${sensor_threshold_meters};'
+                - lambda: 'return id(credits) > 0;'
+                - lambda: 'return id(units_dispensed_today) < (int)id(max_daily_dispenses).state;'
+                - lambda: |-
+                    // Check minimum delay for presence-triggered dispense (30s default)
+                    unsigned long now = millis();
+                    unsigned long min_delay = ${min_dispense_delay_presence};
+                    return (now - id(last_dispense_millis)) >= min_delay;
+            then:
+              # Update timestamp IMMEDIATELY to prevent multiple triggers during dispense
+              - globals.set:
+                  id: last_dispense_millis
+                  value: !lambda 'return millis();'
+              - script.execute:
+                  id: dispense_food
+                  remaining_dispenses: 1
+  
+  # Convert voltage to distance (meters)
+  # Sharp GP2Y0A21YK0F: ~3.0V @ 10cm, ~0.4V @ 80cm
+  # Formula: distance (cm) = 27.86 * voltage^-1.15 (approximation)
+  - platform: template
+    name: "Proximity Distance"
+    icon: "mdi:ruler"
+    id: proximity_distance
+    unit_of_measurement: "m"
+    device_class: distance
+    state_class: measurement
+    accuracy_decimals: 3
+    update_interval: 500ms
+    entity_category: diagnostic
+    lambda: |-
+      float voltage = id(proximity_volts).state;
+      if (voltage < 0.4) voltage = 0.4;  // Clamp to sensor range
+      if (voltage > 3.0) voltage = 3.0;
+      
+      // Convert voltage to distance in cm, then to meters
+      float distance_cm = 27.86 * pow(voltage, -1.15);
+      float distance_m = distance_cm / 100.0;
+      
+      return distance_m;
+    filters:
+      - sliding_window_moving_average:
+          window_size: 3
+          send_every: 1
+  
+  # Expose monitoring sensors to Home Assistant
+  - platform: template
+    name: "Credits Remaining"
+    id: credits_sensor
+    icon: "mdi:cash-multiple"
+    update_interval: 10s
+    lambda: 'return id(credits);'
+  
+  - platform: template
+    name: "Units Dispensed Today"
+    id: units_today_sensor
+    icon: "mdi:counter"
+    update_interval: 10s
+    lambda: 'return id(units_dispensed_today);'
+  
+  - platform: template
+    name: "Lifetime Units Dispensed"
+    id: lifetime_sensor
+    icon: "mdi:counter"
+    update_interval: 60s
+    lambda: 'return id(lifetime_dispensed);'
+    entity_category: diagnostic
+
+output:
+  - platform: ledc
+    pin: ${servo_pin}
+    id: servo_out
+    frequency: 50Hz
+
+servo:
+  - id: feed_servo
+    output: servo_out
+    auto_detach_time: 1s
+    min_level: ${servo_min_level}
+    max_level: ${servo_max_level}
+    idle_level: ${servo_idle_level} 
+
+script:
+  # Internal script - shared dispense logic
+  - id: do_dispense
+    mode: queued
+    parameters:
+      decrement_credits: bool
+      check_limits: bool
+    then:
+      # Safety check: Don't dispense if at daily limit (if check_limits is true)
+      - if:
+          condition:
+            and:
+              - lambda: 'return check_limits;'
+              - lambda: 'return id(units_dispensed_today) >= (int)id(max_daily_dispenses).state;'
+          then:
+            - logger.log: "Daily dispense limit reached, refusing to dispense"
+            - script.stop: do_dispense
+      
+      # Safety check: Don't dispense if no credits (if check_limits is true)
+      - if:
+          condition:
+            and:
+              - lambda: 'return check_limits;'
+              - lambda: 'return id(credits) <= 0;'
+          then:
+            - logger.log: "No credits available"
+            - script.stop: do_dispense
+      
+      # Perform physical dispense with anti-jam sequence
+      # Step 1: Roll back to release any tension
+      - servo.write:
+          id: feed_servo
+          level: ${servo_rollback_level}
+      - delay: ${servo_rollback_interval}
+      # Step 2: Open to dispense position
+      - servo.write:
+          id: feed_servo
+          level: ${servo_dispense_level}
+      - delay: ${door_open_duration}
+      # Step 3: Roll back again to clear any jams
+      - servo.write:
+          id: feed_servo
+          level: ${servo_rollback_level}
+      - delay: ${servo_rollback_interval}
+      # Step 4: Return to idle/closed position
+      - servo.write:
+          id: feed_servo
+          level: ${servo_idle_level}
+      - delay: 500ms
+      
+      # Update accumulators
+      - globals.set:
+          id: units_dispensed_today
+          value: !lambda 'return id(units_dispensed_today) + 1;'
+      - globals.set:
+          id: lifetime_dispensed
+          value: !lambda 'return id(lifetime_dispensed) + 1;'
+      
+      # Decrement credit balance on automatic dispense
+      - if:
+          condition:
+            lambda: 'return decrement_credits;'
+          then:
+            - globals.set:
+                id: credits
+                value: !lambda 'return id(credits) - 1;'
+      
+      - logger.log:
+          format: "Dispensed! Today: %d/%d, Balance: %d"
+          args: [ 'id(units_dispensed_today)', '(int)id(max_daily_dispenses).state', 'id(credits)' ]
+  
+  # Shared entry processor - awards credits then dispenses units
+  # Called by buttons, API services, and the schedule loop
+  - id: process_entry
+    mode: queued
+    parameters:
+      award_amount: int
+      dispense_count: int
+    then:
+      # Apply award (clamp to [0, max_credits])
+      - lambda: |-
+          id(credits) += award_amount;
+          if (id(credits) < 0) id(credits) = 0;
+          int max_cr = (int)id(max_credits).state;
+          if (id(credits) > max_cr) id(credits) = max_cr;
+          ESP_LOGI("feeder", "Entry: award=%d, balance=%d", award_amount, id(credits));
+      # Dispense if requested (limited by available credits)
+      - if:
+          condition:
+            lambda: 'return dispense_count > 0 && id(credits) > 0;'
+          then:
+            - lambda: |-
+                int actual = (dispense_count < id(credits)) ? dispense_count : id(credits);
+                ESP_LOGI("feeder", "Entry: dispensing %d units", actual);
+                id(dispense_food)->execute(actual);
+  
+  # Automatic dispense - respects credits and safety limits
+  - id: dispense_food
+    mode: queued
+    parameters:
+      remaining_dispenses: int
+    then:
+      - script.execute:
+          id: do_dispense
+          decrement_credits: true
+          check_limits: true
+      
+      # Chain if more dispenses requested and credits/limits allow
+      - if:
+          condition:
+            and:
+              - lambda: 'return remaining_dispenses > 1;'
+              - lambda: 'return id(credits) > 0;'
+              - lambda: 'return id(units_dispensed_today) < (int)id(max_daily_dispenses).state;'
+          then:
+            - delay: ${min_dispense_delay_scheduled}ms
+            - script.execute:
+                id: dispense_food
+                remaining_dispenses: !lambda 'return remaining_dispenses - 1;'

@@ -1,0 +1,56 @@
+substitutions:
+  devicename: "cat-feeder"
+  devicename_friendly: "Cat Feeder"
+  dns_domain: !secret dns_domain
+
+  # ESPHome API encryption key. Generate one at: https://esphome.io/components/api.html
+  api_key: !secret esphome_api_key
+
+  # Hardware Pins — defaults are for the Adafruit QT Py ESP32-S2
+  servo_pin: A1
+  sensor_pin: A2  # Must use an ADC1 pin (A2 or A3) — ADC2 pins conflict with WiFi
+
+  # Tuning
+  sensor_threshold_meters: "0.15"  # Proximity distance to trigger a claim (in metres)
+  door_open_duration: "1s"
+  daily_counter_reset_time: "06:00"         # Resets counters at 6 AM (or 6 hours after boot if offline)
+  min_dispense_delay_scheduled: "1000"      # Minimum ms between scheduled dispenses
+  min_dispense_delay_presence: "30000"      # Minimum ms between presence-triggered dispenses
+
+  # Servo calibration — adjust these without reflashing
+  servo_min_level: "3%"         # Pulse width for 0° (closed position)
+  servo_max_level: "12%"        # Pulse width for 180° (fully open)
+  servo_idle_level: "3%"        # Position when idle (typically closed)
+  servo_dispense_level: "50%"   # Position for dispensing (50% ≈ 90°)
+  servo_rollback_level: "1%"    # Anti-jam position (slightly before idle to release tension)
+  servo_rollback_interval: "300ms"  # Hold time at rollback position
+
+# ---------------------------------------------------------
+# BOARD — change this to match your hardware
+# ---------------------------------------------------------
+esp32:
+  board: adafruit_qtpy_esp32s2
+  framework:
+    type: arduino
+
+# ---------------------------------------------------------
+# CHONK-O-MATIC PACKAGE (pulled from GitHub)
+# ---------------------------------------------------------
+packages:
+  feeder_logic:
+    url: https://github.com/barjonas/chonk-o-matic
+    ref: main
+    files:
+      - chonk-o-matic.yaml
+
+# ---------------------------------------------------------
+# WIFI
+# ---------------------------------------------------------
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  use_address: "${devicename}.${dns_domain}"
+
+  ap:
+    ssid: "${devicename_friendly} Fallback"
+    password: !secret fallback_ap_password
