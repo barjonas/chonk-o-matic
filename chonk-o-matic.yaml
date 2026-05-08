@@ -89,15 +89,6 @@ globals:
     initial_value: '0'
 
 # ---------------------------------------------------------
-# BUILD OPTIONS
-# Force-include ArduinoJson so lambdas can use it without a local .h file.
-# build_src_flags applies only to main.cpp (not libraries), so it won't
-# conflict with ESPHome's own build_flags.
-# ---------------------------------------------------------
-platformio_options:
-  build_src_flags: "-include ArduinoJson.h"
-
-# ---------------------------------------------------------
 # TIME (Network Only)
 # ---------------------------------------------------------
 time:

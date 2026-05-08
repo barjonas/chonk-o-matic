@@ -90,7 +90,7 @@ packages:
       - chonk-o-matic.yaml
 ```
 
-When ESPHome compiles your device, it automatically fetches `chonk-o-matic.yaml` (and the accompanying `json_helper.h`) directly from this GitHub repository and merges it with your device config. You do not need to download or copy any package files manually — ESPHome handles it. Your device YAML only needs to contain the things that are unique to your hardware: board type, pins, WiFi credentials, and tuning substitutions.
+When ESPHome compiles your device, it automatically fetches `chonk-o-matic.yaml` directly from this GitHub repository and merges it with your device config. You do not need to download or copy any package files manually — ESPHome handles it. Your device YAML only needs to contain the things that are unique to your hardware: board type, pins, WiFi credentials, and tuning substitutions.
 
 ### Step 2 — Create secrets
 

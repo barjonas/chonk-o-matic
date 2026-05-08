@@ -43,6 +43,11 @@ packages:
     files:
       - chonk-o-matic.yaml
 
+# Required for the package's lambdas to use ArduinoJson.
+# platformio_options cannot live inside a remote package, so it must be here.
+platformio_options:
+  build_src_flags: "-include ArduinoJson.h"
+
 # ---------------------------------------------------------
 # WIFI
 # ---------------------------------------------------------
