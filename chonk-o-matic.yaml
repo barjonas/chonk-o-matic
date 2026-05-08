@@ -3,6 +3,8 @@ esphome:
   friendly_name: ${devicename_friendly}
   libraries:
     - "bblanchon/ArduinoJson"
+  includes:
+    - "<ArduinoJson.h>"  # Injects #include <ArduinoJson.h> into main.cpp for lambda use
   on_boot:
     priority: 600
     then:

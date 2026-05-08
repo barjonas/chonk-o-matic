@@ -92,14 +92,7 @@ packages:
 
 When ESPHome compiles your device, it automatically fetches `chonk-o-matic.yaml` directly from this GitHub repository and merges it with your device config. You do not need to download or copy any package files manually — ESPHome handles it. Your device YAML only needs to contain the things that are unique to your hardware: board type, pins, WiFi credentials, and tuning substitutions.
 
-Your device config also includes this block:
-
-```yaml
-platformio_options:
-  build_flags: "-include ArduinoJson.h"
-```
-
-This is required because the package uses the ArduinoJson library in its lambdas, but ESPHome does not allow remote packages to set `platformio_options` — only local device configs can. The flag force-includes the ArduinoJson header when compiling your device firmware. **Do not remove it.**
+The package itself declares the ArduinoJson library and injects `#include <ArduinoJson.h>` into the compiled firmware using ESPHome's `includes` feature — so you don't need to add anything special to your device config.
 
 ### Step 2 — Create secrets
 

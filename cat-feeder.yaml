@@ -35,12 +35,6 @@ packages:
     files:
       - chonk-o-matic.yaml
 
-# Required for the package's lambdas to use ArduinoJson.
-# platformio_options cannot live inside a remote package, so it must be here.
-# build_flags (not build_src_flags) is needed for ESPHome to apply this correctly.
-platformio_options:
-  build_flags: "-include ArduinoJson.h"
-
 wifi:
   ssid: !secret admin_wifi_ssid
   password: !secret admin_wifi_password
