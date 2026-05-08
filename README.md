@@ -92,6 +92,15 @@ packages:
 
 When ESPHome compiles your device, it automatically fetches `chonk-o-matic.yaml` directly from this GitHub repository and merges it with your device config. You do not need to download or copy any package files manually — ESPHome handles it. Your device YAML only needs to contain the things that are unique to your hardware: board type, pins, WiFi credentials, and tuning substitutions.
 
+Your device config also includes this block:
+
+```yaml
+platformio_options:
+  build_flags: "-include ArduinoJson.h"
+```
+
+This is required because the package uses the ArduinoJson library in its lambdas, but ESPHome does not allow remote packages to set `platformio_options` — only local device configs can. The flag force-includes the ArduinoJson header when compiling your device firmware. **Do not remove it.**
+
 ### Step 2 — Create secrets
 
 Add the following entries to your ESPHome `secrets.yaml`:
@@ -331,6 +340,35 @@ chonk-o-matic/
 ├── example.yaml         # Copy this to your ESPHome config directory and customise
 └── README.md
 ```
+
+---
+
+## Updates & Versioning
+
+New releases are published on the [GitHub Releases page](https://github.com/barjonas/chonk-o-matic/releases).
+
+The `example.yaml` defaults to tracking the `main` branch:
+
+```yaml
+packages:
+  feeder_logic:
+    url: https://github.com/barjonas/chonk-o-matic
+    ref: main
+```
+
+For a stable installation that only changes when you choose, pin to a specific release tag instead:
+
+```yaml
+    ref: v1.0.0
+```
+
+**Important:** ESPHome caches remote packages locally. After you change the `ref` value, you must clear the cache before rebuilding, otherwise ESPHome will silently continue using the old version:
+
+```bash
+rm -rf /config/esphome/.esphome/packages/
+```
+
+Run this in a terminal on your Home Assistant host (via the **Terminal & SSH** add-on or the VS Code add-on terminal), then trigger a fresh build from the ESPHome dashboard.
 
 ---
 
